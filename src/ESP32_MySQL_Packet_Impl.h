@@ -726,6 +726,13 @@ bool MySQL_Packet::handle_auth_switch_request(char *password)
   while (offset < end && buffer[offset] != 0x00)
     offset++;
 
+  // Check that we found a null terminator (not just reached end of buffer)
+  if (offset >= end)
+  {
+    ESP32_MYSQL_LOGERROR("handle_auth_switch_request: Plugin name not null-terminated");
+    return false;
+  }
+
   if (offset <= plugin_start)
   {
     ESP32_MYSQL_LOGERROR("handle_auth_switch_request: No plugin name found");
@@ -735,7 +742,6 @@ bool MySQL_Packet::handle_auth_switch_request(char *password)
   size_t plugin_len = min((size_t)(sizeof(auth_plugin) - 1), offset - plugin_start);
   memset(auth_plugin, 0, sizeof(auth_plugin));
   memcpy(auth_plugin, &buffer[plugin_start], plugin_len);
-  auth_plugin[plugin_len] = 0;
 
   // Update auth plugin type
   auth_plugin_type = plugin_from_name(auth_plugin);

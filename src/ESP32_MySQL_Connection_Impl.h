@@ -284,8 +284,15 @@ Connection_Result ESP32_MySQL_Connection::connectNonBlocking(const IPAddress& se
 
 //////////////////////////////////////////////////////////////
 
-bool ESP32_MySQL_Connection::handle_authentication_result()
+bool ESP32_MySQL_Connection::handle_authentication_result(int depth)
 {
+  // Prevent unbounded recursion from malicious/misconfigured servers
+  if (depth >= MAX_AUTH_SWITCH_DEPTH)
+  {
+    ESP32_MYSQL_LOGERROR("handle_authentication_result: Max auth switch depth exceeded");
+    return false;
+  }
+
   const int type = get_packet_type();
 
   if (type == ESP32_MYSQL_OK_PACKET)
@@ -327,7 +334,7 @@ bool ESP32_MySQL_Connection::handle_authentication_result()
       }
       
       // Recursively handle the result (could be OK, error, or further auth steps)
-      return handle_authentication_result();
+      return handle_authentication_result(depth + 1);
     }
     else
     {
