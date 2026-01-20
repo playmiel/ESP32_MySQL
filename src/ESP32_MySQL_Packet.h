@@ -31,6 +31,7 @@
 
 #define ESP32_MYSQL_OK_PACKET         0x00
 #define ESP32_MYSQL_EOF_PACKET        0xfe
+#define ESP32_MYSQL_AUTH_SWITCH       0xfe  // AuthSwitchRequest uses same byte as EOF
 #define ESP32_MYSQL_ERROR_PACKET      0xff
 
 #define MAX_TRANSMISSION_UNIT   1500
@@ -170,6 +171,8 @@ class MySQL_Packet
       return cached_password;
     }
     bool    scramble_password(char *password, byte *pwd_hash);
+    bool    handle_auth_switch_request(char *password);
+    void    send_auth_switch_response(char *password, const char *plugin_name, uint8_t sequence_id);
 
     bool    read_packet();
     

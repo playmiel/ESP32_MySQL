@@ -297,6 +297,36 @@ bool ESP32_MySQL_Connection::handle_authentication_result()
     return false;
   }
 
+  // Handle AuthSwitchRequest (0xFE packet with plugin name)
+  // This happens when the server's default auth plugin differs from the user's auth plugin
+  if (type == ESP32_MYSQL_AUTH_SWITCH && buffer && packet_len > 1)
+  {
+    // AuthSwitchRequest format:
+    // 1 byte: status (0xFE)
+    // string[NUL]: plugin name
+    // string[EOF]: plugin provided data (new scramble)
+    
+    char *password = (char *)get_cached_password();
+    
+    if (handle_auth_switch_request(password))
+    {
+      // Read the response after sending auth switch response
+      if (!read_packet())
+      {
+        ESP32_MYSQL_LOGERROR("Failed reading packet after auth switch response");
+        return false;
+      }
+      
+      // Recursively handle the result (could be OK, error, or further auth steps)
+      return handle_authentication_result();
+    }
+    else
+    {
+      ESP32_MYSQL_LOGERROR("Failed to handle auth switch request");
+      return false;
+    }
+  }
+
   if ((auth_plugin_type == AUTH_CACHING_SHA2_PASSWORD) && buffer && (packet_len >= 2))
   {
     // caching_sha2_password returns small packets with auth stage markers
