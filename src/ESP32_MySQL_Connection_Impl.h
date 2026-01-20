@@ -299,8 +299,17 @@ bool ESP32_MySQL_Connection::handle_authentication_result()
 
   // Handle AuthSwitchRequest (0xFE packet with plugin name)
   // This happens when the server's default auth plugin differs from the user's auth plugin
-  if (type == ESP32_MYSQL_AUTH_SWITCH && buffer && packet_len > 1)
+  if (type == ESP32_MYSQL_AUTH_SWITCH && buffer && packet_len >= 1)
   {
+    // Check for Old Auth Switch Request (packet_len == 1, just 0xFE)
+    // This is for very old mysql_old_password which is deprecated and insecure
+    if (packet_len == 1)
+    {
+      ESP32_MYSQL_LOGERROR("Old Auth Switch Request received (mysql_old_password) - not supported");
+      ESP32_MYSQL_LOGERROR("Please upgrade user to mysql_native_password or caching_sha2_password");
+      return false;
+    }
+    
     // AuthSwitchRequest format:
     // 1 byte: status (0xFE)
     // string[NUL]: plugin name
