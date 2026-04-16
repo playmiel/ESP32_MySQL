@@ -808,6 +808,171 @@ bool MySQL_Packet::scramble_password_sha256(char *password, byte *pwd_hash)
 }
 
 /*
+  handle_auth_switch_request - Handle AuthSwitchRequest from server
+
+  This method handles the AuthSwitchRequest packet (0xFE) sent by the server
+  when it requires a different authentication method than what the client
+  initially used. This commonly happens when:
+  - Server default is caching_sha2_password but user has mysql_native_password
+  - Or vice versa
+
+  The AuthSwitchRequest packet format is:
+  1 byte:           status (0xFE)
+  string[NUL]:      plugin name
+  string[EOF]:      auth plugin data (new scramble)
+
+  password[in]    User's password in clear text
+
+  Returns bool - True = auth switch handled successfully
+*/
+bool MySQL_Packet::handle_auth_switch_request(char *password)
+{
+  if (!buffer || packet_len < 2)
+  {
+    ESP32_MYSQL_LOGERROR("handle_auth_switch_request: Invalid buffer or packet");
+    return false;
+  }
+
+  // Payload starts at offset 4 (after packet header), first byte is 0xFE
+  size_t offset = 5; // Skip header (4 bytes) + status byte (0xFE)
+  const size_t end = packet_len + 4;
+
+  // Read plugin name (null-terminated string)
+  size_t plugin_start = offset;
+  while (offset < end && buffer[offset] != 0x00)
+    offset++;
+
+  // Check that we found a null terminator (not just reached end of buffer)
+  if (offset >= end)
+  {
+    ESP32_MYSQL_LOGERROR("handle_auth_switch_request: Plugin name not null-terminated");
+    return false;
+  }
+
+  if (offset <= plugin_start)
+  {
+    ESP32_MYSQL_LOGERROR("handle_auth_switch_request: No plugin name found");
+    return false;
+  }
+
+  size_t plugin_len = min((size_t)(sizeof(auth_plugin) - 1), offset - plugin_start);
+  memset(auth_plugin, 0, sizeof(auth_plugin));
+  memcpy(auth_plugin, &buffer[plugin_start], plugin_len);
+
+  // Update auth plugin type
+  auth_plugin_type = plugin_from_name(auth_plugin);
+  ESP32_MYSQL_LOGINFO1("AuthSwitchRequest to plugin:", auth_plugin);
+
+  // Skip null terminator
+  offset++;
+
+  // Read new scramble/auth data (rest of packet)
+  size_t new_seed_len = (offset < end) ? (end - offset) : 0;
+  
+  if (new_seed_len > 0)
+  {
+    // Update seed with new auth plugin data
+    memset(seed, 0, sizeof(seed));
+    size_t copy_len = min(new_seed_len, sizeof(seed));
+    memcpy(seed, &buffer[offset], copy_len);
+    
+    // Some auth plugins send 21 bytes (20 + null terminator), handle this
+    if (new_seed_len >= 20)
+    {
+      ESP32_MYSQL_LOGINFO1("New scramble received, length:", new_seed_len);
+    }
+  }
+
+  // Get sequence ID for response
+  uint8_t response_seq = (uint8_t)(buffer[3] + 1);
+  
+  // Send authentication response based on the new plugin
+  send_auth_switch_response(password, auth_plugin, response_seq);
+  
+  return true;
+}
+
+/*
+  send_auth_switch_response - Send response to AuthSwitchRequest
+
+  This method sends the appropriate scrambled password in response to
+  an AuthSwitchRequest from the server.
+
+  password[in]      User's password in clear text
+  plugin_name[in]   Authentication plugin name requested by server
+  sequence_id[in]   Packet sequence ID to use
+*/
+void MySQL_Packet::send_auth_switch_response(char *password, const char *plugin_name, uint8_t sequence_id)
+{
+  byte scramble[SHA256_HASH_SIZE];
+  bool has_scramble = false;
+  uint8_t scramble_len = 0;
+
+  if (!password || strlen(password) == 0)
+  {
+    // Empty password - send empty response
+    byte empty_response[5];
+    store_int(empty_response, 0, 3);
+    empty_response[3] = sequence_id;
+    write_bytes(empty_response, 4);
+    set_next_sequence_id(sequence_id + 1);
+    ESP32_MYSQL_LOGINFO("Sent empty auth switch response (no password)");
+    return;
+  }
+
+  AuthPlugin plugin = plugin_from_name(plugin_name);
+
+  if (plugin == AUTH_CACHING_SHA2_PASSWORD)
+  {
+    has_scramble = scramble_password_caching_sha2(password, scramble);
+    scramble_len = SHA256_HASH_SIZE;
+  }
+  else if (plugin == AUTH_SHA256_PASSWORD)
+  {
+    has_scramble = scramble_password_sha256(password, scramble);
+    scramble_len = SHA256_HASH_SIZE;
+  }
+  else // Default to mysql_native_password
+  {
+    has_scramble = scramble_password(password, scramble);
+    scramble_len = 20;
+  }
+
+  if (has_scramble)
+  {
+    // Build response packet: header (4) + scrambled password
+    size_t packet_size = 4 + scramble_len;
+    byte *response = (byte *)malloc(packet_size);
+    
+    if (!response)
+    {
+      ESP32_MYSQL_LOGERROR("Failed to allocate auth switch response packet");
+      return;
+    }
+
+    store_int(response, scramble_len, 3);
+    response[3] = sequence_id;
+    memcpy(response + 4, scramble, scramble_len);
+
+    write_bytes(response, packet_size);
+    set_next_sequence_id(sequence_id + 1);
+    free(response);
+
+    ESP32_MYSQL_LOGINFO1("Sent auth switch response for plugin:", plugin_name);
+  }
+  else
+  {
+    // Failed to scramble, send empty response
+    byte empty_response[5];
+    store_int(empty_response, 0, 3);
+    empty_response[3] = sequence_id;
+    write_bytes(empty_response, 4);
+    set_next_sequence_id(sequence_id + 1);
+    ESP32_MYSQL_LOGERROR("Failed to scramble password for auth switch");
+  }
+}
+
+/*
   wait_for_bytes - Wait until data is available for reading
 
   This method is used to permit the connector to respond to servers
