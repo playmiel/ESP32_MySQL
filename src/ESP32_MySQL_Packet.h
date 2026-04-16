@@ -100,6 +100,8 @@ class MySQL_Packet
     
     bool    complete_handshake(char *user, char *password);
     void    send_authentication_packet(char *user, char *password, char *db = NULL, uint32_t client_flags = 0, uint8_t sequence_id = 0x01);
+    bool    handle_auth_switch_request();
+    bool    send_auth_switch_response();
     void    parse_handshake_packet();
     AuthPlugin get_auth_plugin() const
     {

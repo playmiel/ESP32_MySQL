@@ -606,6 +606,122 @@ void MySQL_Packet::send_authentication_packet(char *user, char *password, char *
   write_bytes((uint8_t*)this_buffer, size_send);
 }
 
+bool MySQL_Packet::handle_auth_switch_request()
+{
+  if (!buffer || (packet_len < 2) || (buffer[4] != ESP32_MYSQL_EOF_PACKET))
+    return false;
+
+  const size_t payload_start = 4;
+  const size_t payload_end = payload_start + packet_len;
+  size_t pos = payload_start + 1; // skip 0xFE marker
+
+  if (pos >= payload_end)
+    return false;
+
+  const size_t plugin_start = pos;
+
+  while ((pos < payload_end) && (buffer[pos] != 0x00))
+    pos++;
+
+  const size_t plugin_len = (pos > plugin_start) ? min((size_t) (sizeof(auth_plugin) - 1), pos - plugin_start) : 0;
+
+  if (plugin_len == 0)
+  {
+    ESP32_MYSQL_LOGERROR("AuthSwitchRequest missing plugin name");
+    return false;
+  }
+
+  memcpy(auth_plugin, &buffer[plugin_start], plugin_len);
+  auth_plugin[plugin_len] = 0;
+  auth_plugin_type = plugin_from_name(auth_plugin);
+
+  // Skip null terminator and copy new scramble/seed data when present.
+  if ((pos < payload_end) && (buffer[pos] == 0x00))
+    pos++;
+
+  memset(seed, 0, sizeof(seed));
+
+  if (pos < payload_end)
+  {
+    size_t seed_len = payload_end - pos;
+
+    // Some servers include a trailing NUL byte in auth plugin data.
+    if ((seed_len > 0) && (buffer[payload_end - 1] == 0x00))
+      seed_len--;
+
+    const size_t copy_len = min(seed_len, sizeof(seed));
+
+    if (copy_len > 0)
+      memcpy(seed, &buffer[pos], copy_len);
+  }
+
+  ESP32_MYSQL_LOGINFO1("AuthSwitchRequest plugin:", auth_plugin);
+  return true;
+}
+
+bool MySQL_Packet::send_auth_switch_response()
+{
+  const char *pwd = get_cached_password();
+
+  if (!pwd)
+  {
+    ESP32_MYSQL_LOGERROR("Missing cached password for AuthSwitchResponse");
+    return false;
+  }
+
+  byte scramble[SHA256_HASH_SIZE];
+  memset(scramble, 0, sizeof(scramble));
+
+  const AuthPlugin plugin = (auth_plugin_type == AUTH_UNKNOWN) ? AUTH_MYSQL_NATIVE_PASSWORD : auth_plugin_type;
+  bool has_scramble = false;
+  uint8_t scramble_len = 0;
+
+  if (plugin == AUTH_CACHING_SHA2_PASSWORD)
+  {
+    has_scramble = scramble_password_caching_sha2((char *) pwd, scramble);
+    scramble_len = SHA256_HASH_SIZE;
+  }
+  else if (plugin == AUTH_SHA256_PASSWORD)
+  {
+    has_scramble = scramble_password_sha256((char *) pwd, scramble);
+    scramble_len = SHA256_HASH_SIZE;
+  }
+  else
+  {
+    has_scramble = scramble_password((char *) pwd, scramble);
+    scramble_len = 20;
+  }
+
+  const size_t payload_len = has_scramble ? scramble_len : 0;
+  const size_t packet_len_out = payload_len + 4;
+  uint8_t *packet = (uint8_t *) malloc(packet_len_out);
+
+  if (!packet)
+  {
+    ESP32_MYSQL_LOGERROR("Failed to allocate AuthSwitchResponse packet");
+    return false;
+  }
+
+  store_int(packet, payload_len, 3);
+  const uint8_t response_seq = buffer ? (uint8_t) (buffer[3] + 1) : get_next_sequence_id();
+  packet[3] = response_seq;
+
+  if (payload_len > 0)
+    memcpy(packet + 4, scramble, payload_len);
+
+  const bool wrote = write_bytes(packet, packet_len_out);
+  set_next_sequence_id(response_seq + 1);
+  free(packet);
+
+  if (!wrote)
+  {
+    ESP32_MYSQL_LOGERROR("Failed to send AuthSwitchResponse");
+    return false;
+  }
+
+  return true;
+}
+
 /*
   scramble_password - Build a SHA1 scramble of the user password
 

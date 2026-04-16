@@ -288,6 +288,24 @@ bool ESP32_MySQL_Connection::handle_authentication_result()
 {
   const int type = get_packet_type();
 
+  // During authentication, packet marker 0xFE can be an AuthSwitchRequest.
+  if ((type == ESP32_MYSQL_EOF_PACKET) && buffer && (packet_len > 1) && (buffer[4] == 0xFE))
+  {
+    if (!handle_auth_switch_request())
+      return false;
+
+    if (!send_auth_switch_response())
+      return false;
+
+    if (!read_packet())
+    {
+      ESP32_MYSQL_LOGERROR("Failed reading server packet after AuthSwitchResponse");
+      return false;
+    }
+
+    return handle_authentication_result();
+  }
+
   if (type == ESP32_MYSQL_OK_PACKET)
     return true;
 
